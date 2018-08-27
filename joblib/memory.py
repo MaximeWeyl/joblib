@@ -508,7 +508,6 @@ class MemorizedFunc(Logger):
                           '{}\n {}'.format(signature, traceback.format_exc()))
 
                 out, metadata = self.call(*args, **kwargs)
-                args_id = None
 
         return (out, args_id, metadata)
 
