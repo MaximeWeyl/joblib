@@ -322,17 +322,23 @@ class NotMemorizedFunc(object):
         Original undecorated function.
     """
     # Should be a light as possible (for speed)
-    def __init__(self, func):
+    def __init__(self, func, auto_shelve=False):
         self.func = func
+        self.auto_shelve = auto_shelve
 
     def __call__(self, *args, **kwargs):
-        return self.func(*args, **kwargs)
+        if not self.auto_shelve:
+            return self.func(*args, **kwargs)
+        else:
+            return self.call_and_shelve(*args, **kwargs)
 
     def call_and_shelve(self, *args, **kwargs):
         return NotMemorizedResult(self.func(*args, **kwargs))
 
     def __repr__(self):
-        return '{0}(func={1})'.format(self.__class__.__name__, self.func)
+        return '{0}(func={1}, auto_shelve={2})'.format(
+            self.__class__.__name__,
+            self.func, self.auto_shelve)
 
     def clear(self, warn=True):
         # Argument "warn" is for compatibility with MemorizedFunc.clear
@@ -379,17 +385,23 @@ class MemorizedFunc(Logger):
     verbose: int, optional
         The verbosity flag, controls messages that are issued as
         the function is evaluated.
+
+    auto_shelve: bool, optional
+        If true, calling the object returns a reference, as would
+        call_and_shelve
     """
     # ------------------------------------------------------------------------
     # Public interface
     # ------------------------------------------------------------------------
 
     def __init__(self, func, location, backend='local', ignore=None,
-                 mmap_mode=None, compress=False, verbose=1, timestamp=None):
+                 mmap_mode=None, compress=False, verbose=1, timestamp=None,
+                 auto_shelve=False):
         Logger.__init__(self)
         self.mmap_mode = mmap_mode
         self.compress = compress
         self.func = func
+        self.auto_shelve = auto_shelve
 
         if ignore is None:
             ignore = []
@@ -539,7 +551,10 @@ class MemorizedFunc(Logger):
                                timestamp=self.timestamp)
 
     def __call__(self, *args, **kwargs):
-        return self._cached_call(args, kwargs)[0]
+        if not self.auto_shelve:
+            return self._cached_call(args, kwargs)[0]
+        else:
+            return self.call_and_shelve(*args, **kwargs)
 
     def __getstate__(self):
         """ We don't store the timestamp when pickling, to avoid the hash
@@ -630,8 +645,8 @@ class MemorizedFunc(Logger):
                 extract_first_line(
                     self.store_backend.get_cached_func_code([func_id]))
         except (IOError, OSError):  # some backend can also raise OSError
-                self._write_func_code(func_code, first_line)
-                return False
+            self._write_func_code(func_code, first_line)
+            return False
         if old_func_code == func_code:
             return True
 
@@ -775,9 +790,11 @@ class MemorizedFunc(Logger):
     # ------------------------------------------------------------------------
 
     def __repr__(self):
-        return ("{0}(func={1}, location={2})".format(self.__class__.__name__,
-                                                     self.func,
-                                                     self.store_backend,))
+        return ("{0}(func={1}, location={2}, auto_shelve={3})".format(
+            self.__class__.__name__,
+            self.func,
+            self.store_backend,
+            self.auto_shelve))
 
 
 ###############################################################################
@@ -893,7 +910,8 @@ class Memory(Logger):
             return None
         return os.path.join(self.location, 'joblib')
 
-    def cache(self, func=None, ignore=None, verbose=None, mmap_mode=False):
+    def cache(self, func=None, ignore=None, verbose=None, mmap_mode=False,
+              auto_shelve=False):
         """ Decorates the given function func to only compute its return
             value for input arguments not cached on disk.
 
@@ -910,6 +928,11 @@ class Memory(Logger):
                 The memmapping mode used when loading from cache
                 numpy arrays. See numpy.load for the meaning of the
                 arguments. By default that of the memory object is used.
+            auto_shelve: boolean, optional
+                If true, the decorated function will return references
+                when called directly. If false, the decorated function will
+                return real results, but references will still be available through
+                the call_and_shelve method.
 
             Returns
             -------
@@ -923,9 +946,10 @@ class Memory(Logger):
             # Partial application, to be able to specify extra keyword
             # arguments in decorators
             return functools.partial(self.cache, ignore=ignore,
-                                     verbose=verbose, mmap_mode=mmap_mode)
+                                     verbose=verbose, mmap_mode=mmap_mode,
+                                     auto_shelve=auto_shelve)
         if self.store_backend is None:
-            return NotMemorizedFunc(func)
+            return NotMemorizedFunc(func, auto_shelve=auto_shelve)
         if verbose is None:
             verbose = self._verbose
         if mmap_mode is False:
@@ -936,7 +960,8 @@ class Memory(Logger):
                              backend=self.backend,
                              ignore=ignore, mmap_mode=mmap_mode,
                              compress=self.compress,
-                             verbose=verbose, timestamp=self.timestamp)
+                             verbose=verbose, timestamp=self.timestamp,
+                             auto_shelve=auto_shelve)
 
     def clear(self, warn=True):
         """ Erase the complete cache directory.

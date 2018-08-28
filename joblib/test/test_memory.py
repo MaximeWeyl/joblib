@@ -503,6 +503,28 @@ def test_call_and_shelve(tmpdir):
         result.clear()  # Do nothing if there is no cache.
 
 
+def test_auto_shelve(tmpdir):
+    """Test MemorizedFunc outputting a reference to cache
+    because with auto-shelving"""
+
+    for func, Result in zip((MemorizedFunc(f, tmpdir.strpath, auto_shelve=True),
+                             NotMemorizedFunc(f, auto_shelve=True),
+                             Memory(location=tmpdir.strpath,
+                                    verbose=0).cache(f, auto_shelve=True),
+                             Memory(location=None).cache(f, auto_shelve=True),
+                             ),
+                            (MemorizedResult, NotMemorizedResult,
+                             MemorizedResult, NotMemorizedResult)):
+        result = func(2)
+        assert isinstance(result, Result)
+        assert result.get() == 5
+
+        result.clear()
+        with raises(KeyError):
+            result.get()
+        result.clear()  # Do nothing if there is no cache.
+
+
 def test_call_and_shelve_argument_hash(tmpdir):
     # Verify that a warning is raised when accessing arguments_hash
     # attribute from MemorizedResult
