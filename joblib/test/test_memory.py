@@ -122,6 +122,25 @@ def test_memory_integration(tmpdir):
     memory.cache(f)(1)
 
 
+def test_call_and_cache(tmpdir):
+    """Asserts that the call method returns the same output
+    as the default _call_and_cache without keywords.
+
+    The goal is to assert that the previous call method is still
+    working
+    """
+
+    memory = Memory(location=tmpdir.strpath, mmap_mode='r', verbose=0)
+
+    @memory.cache()
+    def f(*args, **kwargs):
+        return [args, kwargs]
+
+    c1, m1 = f.call(1, 2, 3, a="a", b="b")
+    c2, m2 = f._call_and_cache([1, 2, 3], {"a":"a", "b":"b"})
+    assert c1 == c2
+        
+
 def test_no_memory():
     """ Test memory with location=None: no memoize """
     accumulator = list()
