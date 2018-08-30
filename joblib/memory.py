@@ -59,6 +59,38 @@ def extract_first_line(func_code):
     return func_code, first_line
 
 
+def _is_shelved(x):
+    return isinstance(x, MemorizedResult)
+
+
+def _unshelve_args(args, kwargs):
+    """From a mix of shelved and unshelved args and keywords,
+    returns unshelved args and keywords
+    """
+    uncached_args = [
+        a.get() if _is_shelved(a) else a
+        for a in args
+    ]
+
+    uncached_kwargs = dict(
+        (k, v.get()) if _is_shelved(v) else (k, v)
+        for (k, v) in kwargs.items()
+    )
+
+    return uncached_args, uncached_kwargs
+
+
+def _check_any_shelved_arg(args, kwargs):
+    """Returns True if there is any shelved argument or keyword"""
+    for a in args:
+        if _is_shelved(a):
+            return True
+    for v in kwargs.values():
+        if _is_shelved(v):
+            return True
+    return False
+
+
 class JobLibCollisionWarning(UserWarning):
     """ Warn that there might be a collision between names of functions.
     """
@@ -438,7 +470,21 @@ class MemorizedFunc(Logger):
             doc = func.__doc__
         self.__doc__ = 'Memoized version of %s' % doc
 
-    def _cached_call(self, args, kwargs, shelving=False):
+    def _unshelve_and_hash_args_cache_callback(self, x):
+        return x[0]
+
+    def _unshelve_and_hash_args(self, *args, **kwargs):
+        """TODO
+        """
+        unshelved_args, unshelved_kwargs = _unshelve_args(args, kwargs)
+        unshelved_args_hash = self._get_argument_hash(
+            *unshelved_args, **unshelved_kwargs)
+        return unshelved_args_hash, unshelved_args, unshelved_kwargs
+
+    def _cached_call(
+        self, args, kwargs, shelving=False,
+        hashing_unshelved_args=False
+    ):
         """Call wrapped function and cache result, or read cache if available.
 
         This function returns the wrapped function output and some metadata.
@@ -452,6 +498,7 @@ class MemorizedFunc(Logger):
         shelving: bool
             True when called via the call_and_shelve function.
 
+        alternative_func=None TODO
 
         Returns
         -------
@@ -466,6 +513,7 @@ class MemorizedFunc(Logger):
         metadata: dict
             Some metadata about wrapped function call (see _persist_input()).
         """
+
         func_id, args_id = self._get_output_identifiers(*args, **kwargs)
         metadata = None
         msg = None
@@ -473,11 +521,36 @@ class MemorizedFunc(Logger):
         # Wether or not the memorized function must be called
         must_call = False
 
+        same_func_cached = self._check_previous_func_code(stacklevel=4)
+
+        if not hashing_unshelved_args:
+            # Standard call
+            alternative_func = None
+            cache_callback = None
+
+            if self.auto_shelve and _check_any_shelved_arg(args, kwargs):
+                shelved_args, shelved_kwargs = args, kwargs
+                (
+                    (args_id, args, kwargs),
+                    _,
+                    _
+                ) = self._cached_call(
+                    shelved_args, shelved_kwargs,
+                    shelving=False,
+                    hashing_unshelved_args=True
+                )
+
+        else:
+            alternative_func = self._unshelve_and_hash_args
+            cache_callback = self._unshelve_and_hash_args_cache_callback
+
         # FIXME: The statements below should be try/excepted
         # Compare the function code with the previous to see if the
         # function code has changed
-        if not (self._check_previous_func_code(stacklevel=4) and
-                self.store_backend.contains_item([func_id, args_id])):
+        if not (
+            same_func_cached and
+            self.store_backend.contains_item([func_id, args_id])
+        ):
             if self._verbose > 10:
                 _, name = get_func_name(self.func)
                 self.warn('Computing func {0}, argument hash {1} '
@@ -503,6 +576,10 @@ class MemorizedFunc(Logger):
                 else:
                     out = None
 
+                if hashing_unshelved_args:
+                    # Because only the first component was cached
+                    out = (out, None, None)
+
                 if self._verbose > 4:
                     t = time.time() - t0
                     _, name = get_func_name(self.func)
@@ -517,7 +594,18 @@ class MemorizedFunc(Logger):
                 must_call = True
 
         if must_call:
-            out, metadata = self.call(*args, **kwargs)
+            # When the args hash was loaded from shelved args
+            # cache, args and kwargs are None.
+            # If the arg hash was computed by the unshelving, or
+            # if no unshelving occurred, they are a list and a dict
+            if args is None or kwargs is None:
+                args, kwargs = _unshelve_args(shelved_args, shelved_kwargs)
+
+            out, metadata = self._call_and_cache(
+                args, kwargs, alternative_func=alternative_func,
+                cache_callback=cache_callback
+            )
+
             if self.mmap_mode is not None:
                 # Memmap the output at the first call to be consistent with
                 # later calls
@@ -716,13 +804,29 @@ class MemorizedFunc(Logger):
         """ Force the execution of the function with the given arguments and
             persist the output values.
         """
+        return self._call_and_cache(args, kwargs)
+
+    def _call_and_cache(
+        self, args, kwargs, alternative_func=None, cache_callback=None
+    ):
+        if alternative_func is not None:
+            func = alternative_func
+        else:
+            func = self.func
+
         start_time = time.time()
         func_id, args_id = self._get_output_identifiers(*args, **kwargs)
         if self._verbose > 0:
-            print(format_call(self.func, args, kwargs))
-        output = self.func(*args, **kwargs)
+            print(format_call(func, args, kwargs))
+
+        output = func(*args, **kwargs)
+        if cache_callback is not None:
+            output_cached = cache_callback(output)
+        else:
+            output_cached = output
+
         self.store_backend.dump_item(
-            [func_id, args_id], output, verbose=self._verbose)
+            [func_id, args_id], output_cached, verbose=self._verbose)
 
         duration = time.time() - start_time
         metadata = self._persist_input(duration, args, kwargs)
