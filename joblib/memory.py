@@ -60,7 +60,7 @@ def extract_first_line(func_code):
 
 
 def _is_shelved(x):
-    return isinstance(x, MemorizedResult)
+    return isinstance(x, BaseResult)
 
 
 def _unshelve_args(args, kwargs):
@@ -209,7 +209,12 @@ _FUNCTION_HASHES = weakref.WeakKeyDictionary()
 ###############################################################################
 # class `MemorizedResult`
 ###############################################################################
-class MemorizedResult(Logger):
+
+class BaseResult(Logger):
+    pass
+
+
+class MemorizedResult(BaseResult):
     """Object representing a cached value.
 
     Attributes
@@ -301,7 +306,7 @@ class MemorizedResult(Logger):
         return state
 
 
-class NotMemorizedResult(object):
+class NotMemorizedResult(BaseResult):
     """Class representing an arbitrary value.
 
     This class is a replacement for MemorizedResult when there is no cache.
@@ -365,6 +370,9 @@ class NotMemorizedFunc(object):
             return self.call_and_shelve(*args, **kwargs)
 
     def call_and_shelve(self, *args, **kwargs):
+        if self.auto_shelve:
+            args, kwargs = _unshelve_args(args, kwargs)
+        
         return NotMemorizedResult(self.func(*args, **kwargs))
 
     def __repr__(self):

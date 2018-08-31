@@ -546,23 +546,58 @@ def test_auto_shelve(tmpdir):
         result.clear()  # Do nothing if there is no cache.
 
 
-def test_auto_shelve_1(tmpdir):
+def test_auto_shelve_2(tmpdir):
     """Test MemorizedFunc outputting a reference to cache
     because with auto-shelving"""
 
-    for memory, Result in zip((Memory(location=tmpdir.strpath, verbose=0),
-                       Memory(location=None)),
-                      (MemorizedResult, NotMemorizedResult)):
+    N = 2000
 
+
+    for location, Result in zip((tmpdir.mkdir("1").strpath, None),
+        (MemorizedResult, NotMemorizedResult)
+    ):
+        memory = Memory(location=location, verbose=0)
         memory.clear()
 
-        memory.cache(auto_shelve=True)
+        def assert_cache_size_delta(d):
+            if location is not None:
+                new_cache_size = len(memory.store_backend.get_items())
+                delta = new_cache_size - assert_cache_size_delta.cache_size
+                assert_cache_size_delta.cache_size = new_cache_size
+                assert delta == d
+        assert_cache_size_delta.cache_size = 0
+
+        @memory.cache(auto_shelve=True)
         def get_ones(N):
             return np.ones(N)
 
-        memory.cache(auto_shelve=True)
+        @memory.cache(auto_shelve=True)
         def double_array(a):
-            return a*2
+            return a * 2
+
+        # Computes the ones
+        assert_cache_size_delta(0)
+        ones = get_ones(N)
+        assert_cache_size_delta(1)
+        assert all(filter(lambda x: x==1, ones.get().tolist()))
+
+        # Computes the twos
+        assert_cache_size_delta(0) 
+        twos = double_array(ones)
+        # One for the twos, and one for the redirection of shelved ones
+        # to unshelved ones
+        assert_cache_size_delta(2)
+        assert all(filter(lambda x: x==2, ones.get().tolist()))
+
+
+        # Test hash unshelved in store
+        # Test hash shelved in store
+        # Test deleting the cached twos
+        # Test deleting the cached redirect
+        # Test deleting both
+        # Test corrupting the cached twos
+        # Test corrupting the cached redirect
+        # Test corrupting both
 
         continue
 
