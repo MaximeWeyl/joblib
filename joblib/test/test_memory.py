@@ -130,7 +130,7 @@ def test_call_and_cache(tmpdir):
     working
     """
 
-    memory = Memory(location=tmpdir.strpath, mmap_mode='r', verbose=0)
+    memory = Memory(location=tmpdir.strpath, verbose=0)
 
     @memory.cache()
     def f(*args, **kwargs):
@@ -300,6 +300,8 @@ def test_argument_change(tmpdir):
     # the second time the argument is x=[None], which is not cached
     # yet, so the functions should be called a second time
     assert func() == 1
+    #And so on..
+    assert func() == 2
 
 
 @with_numpy
@@ -542,6 +544,36 @@ def test_auto_shelve(tmpdir):
         with raises(KeyError):
             result.get()
         result.clear()  # Do nothing if there is no cache.
+
+
+def test_auto_shelve_1(tmpdir):
+    """Test MemorizedFunc outputting a reference to cache
+    because with auto-shelving"""
+
+    for memory, Result in zip((Memory(location=tmpdir.strpath, verbose=0),
+                       Memory(location=None)),
+                      (MemorizedResult, NotMemorizedResult)):
+
+        memory.clear()
+
+        memory.cache(auto_shelve=True)
+        def get_ones(N):
+            return np.ones(N)
+
+        memory.cache(auto_shelve=True)
+        def double_array(a):
+            return a*2
+
+        continue
+
+        result = func(2)
+        assert isinstance(result, Result)
+        assert result.get() == 5
+
+        result.clear()
+        with raises(KeyError):
+            result.get()
+        result.clear()  # Do noth
 
 
 def test_call_and_shelve_argument_hash(tmpdir):
