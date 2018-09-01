@@ -569,26 +569,25 @@ def test_auto_shelve_2(tmpdir):
 
         @memory.cache(auto_shelve=True)
         def get_ones(N):
-            return np.ones(N)
+            return [1 for _ in range(N)]
 
         @memory.cache(auto_shelve=True)
-        def double_array(a):
-            return a * 2
+        def double_array(array):
+            return [a * 2 for a in array]
 
         # Computes the ones
         assert_cache_size_delta(0)
         ones = get_ones(N)
         assert_cache_size_delta(1)
-        assert all(filter(lambda x: x==1, ones.get().tolist()))
+        assert all(filter(lambda x: x == 1, ones.get()))
 
         # Computes the twos
-        assert_cache_size_delta(0) 
+        assert_cache_size_delta(0)
         twos = double_array(ones)
         # One for the twos, and one for the redirection of shelved ones
         # to unshelved ones
         assert_cache_size_delta(2)
-        assert all(filter(lambda x: x==2, ones.get().tolist()))
-
+        assert all(filter(lambda x: x == 2, ones.get()))
 
         # Test hash unshelved in store
         # Test hash shelved in store
