@@ -59,7 +59,11 @@ def check_identity_lazy(func, accumulator, location):
 
 def corrupt_single_cache_item(memory):
     single_cache_item, = memory.store_backend.get_items()
-    output_filename = os.path.join(single_cache_item.path, 'output.pkl')
+    corrupt(single_cache_item.path)
+
+
+def corrupt(path_to_id_folder):
+    output_filename = os.path.join(path_to_id_folder, 'output.pkl')
     with open(output_filename, 'w') as f:
         f.write('garbage')
 
@@ -121,6 +125,25 @@ def test_memory_integration(tmpdir):
     memory = Memory(location=tmpdir.strpath, verbose=0)
     memory.cache(f)(1)
 
+
+def test_call_and_cache(tmpdir):
+    """Asserts that the call method returns the same output
+    as the default _call_and_cache without keywords.
+
+    The goal is to assert that the previous call method is still
+    working
+    """
+
+    memory = Memory(location=tmpdir.strpath, verbose=0)
+
+    @memory.cache()
+    def f(*args, **kwargs):
+        return [args, kwargs]
+
+    c1, m1 = f.call(1, 2, 3, a="a", b="b")
+    c2, m2 = f._call_and_cache([1, 2, 3], {"a":"a", "b":"b"})
+    assert c1 == c2
+        
 
 def test_no_memory():
     """ Test memory with location=None: no memoize """
@@ -281,6 +304,8 @@ def test_argument_change(tmpdir):
     # the second time the argument is x=[None], which is not cached
     # yet, so the functions should be called a second time
     assert func() == 1
+    #And so on..
+    assert func() == 2
 
 
 @with_numpy
@@ -499,6 +524,210 @@ def test_call_and_shelve(tmpdir):
         with raises(KeyError):
             result.get()
         result.clear()  # Do nothing if there is no cache.
+
+
+def test_auto_shelve(tmpdir):
+    """Test MemorizedFunc outputting a reference to cache
+    because with auto-shelving"""
+
+    for func, Result in zip((MemorizedFunc(f, tmpdir.strpath, auto_shelve=True),
+                             NotMemorizedFunc(f, auto_shelve=True),
+                             Memory(location=tmpdir.strpath,
+                                    verbose=0).cache(f, auto_shelve=True),
+                             Memory(location=None).cache(f, auto_shelve=True),
+                             ),
+                            (MemorizedResult, NotMemorizedResult,
+                             MemorizedResult, NotMemorizedResult)):
+        result = func(2)
+        assert isinstance(result, Result)
+        assert result.get() == 5
+
+        result.clear()
+        with raises(KeyError):
+            result.get()
+        result.clear()  # Do nothing if there is no cache.
+
+
+def test_auto_shelve_args_kwargs(tmpdir):
+    """TODO"""
+
+    for location, Result in zip((tmpdir.mkdir("1").strpath, None),
+        (MemorizedResult, NotMemorizedResult)
+    ):
+        memory = Memory(location=location, verbose=0)
+        memory.clear()
+
+        @memory.cache(auto_shelve=True)
+        def sum_args(*args, **kwargs):
+            return sum(args) + sum(kwargs.values())
+
+        @memory.cache(auto_shelve=True)
+        def identity(x):
+            return x
+
+        non_shelved = [1, 2, 3, 4, 5, 6]
+        a, b, c, d, e, f = non_shelved
+        shelved = [identity(x) for x in non_shelved]
+        sa, sb, sc, sd, se, sf = shelved
+
+        assert sum_args(a, b).get() == sum_args(sa, sb).get() == 3
+        assert sum_args(t=c, a=b).get() == sum_args(e=sc, f=sb).get() == 5
+
+        if location is not None:
+            assert sum_args(t=c, a=b).args_id != sum_args(e=sc, f=sb).args_id
+
+            # If the signature matches, and the unshelved and shelved
+            # arguments match, the redirect should give the same final args_id
+            assert sum_args(t=c, a=b).args_id == sum_args(t=sc, a=sb).args_id
+
+@pytest.mark.skip(reason="Not passing yet")
+def test_auto_shelve_cache_management(tmpdir):
+    """Test MemorizedFunc outputting a reference to cache
+    because with auto-shelving"""
+
+    N = 2000
+
+    for location, Result in zip((tmpdir.mkdir("1").strpath, None),
+        (MemorizedResult, NotMemorizedResult)
+    ):
+        memory = Memory(location=location, verbose=0)
+        memory.clear()
+
+        def assert_cache_size_delta(d):
+            if location is not None:
+                new_cache_size = len(memory.store_backend.get_items())
+                delta = new_cache_size - assert_cache_size_delta.cache_size
+                assert_cache_size_delta.cache_size = new_cache_size
+                assert delta == d
+        assert_cache_size_delta.cache_size = 0
+
+        def assert_array_all(a, v):
+            assert len(a) == N
+            assert all(map(lambda x: x == v, a))
+            return True
+
+        @memory.cache(auto_shelve=True)
+        def get_ones(N):
+            return [1 for _ in range(N)]
+
+        @memory.cache(auto_shelve=True)
+        def double_array(array, *args, **kwargs):
+            return [a * 2 for a in array]
+
+        # Computes the ones
+        assert_cache_size_delta(0)
+        ones = get_ones(N)
+        assert_cache_size_delta(1)
+        assert_array_all(ones.get(), 1)
+
+        # Computes the twos
+        assert_cache_size_delta(0)
+        twos = double_array(ones)
+        # One for the twos, and one for the redirection of shelved ones
+        # to unshelved ones
+        assert_cache_size_delta(2)
+        assert assert_array_all(twos.get(), 2)
+
+        twos_b = double_array(array=ones)
+        assert_cache_size_delta(0)
+        assert assert_array_all(twos_b.get(), 2)
+
+        twos_c = double_array(ones, 1, 2)
+        # In this case, the output is identical but the arguments
+        # event unshelved, is different, so there is a new cached
+        # value for the output and a new cache value for the 
+        # unshelving redirection
+        assert_cache_size_delta(2)
+        assert assert_array_all(twos_c.get(), 2)
+
+        if location is not None:
+            func_id, shelved_ones_id = (
+                double_array._get_output_identifiers(ones))
+            func_id_b, unshelved_ones_id = (
+                double_array._get_output_identifiers(ones.get()))
+            assert func_id == func_id_b
+
+            shelved_ones_path = os.path.join(
+                memory.store_backend.location, func_id, shelved_ones_id)
+            unshelved_ones_path = os.path.join(
+                memory.store_backend.location, func_id, unshelved_ones_id)
+
+            assert os.path.exists(unshelved_ones_path)
+            assert os.path.exists(shelved_ones_path)
+
+            # The final shelved result, should be referred to by the hash
+            # of its UNSHELVED argument hash
+            assert twos.args_id == unshelved_ones_id
+
+            # Test hash of the shelved arguments must point to a redirection
+            # to the ubshelved arguments in the cache
+            assert memory.store_backend.contains_item(
+                [func_id, shelved_ones_id])
+            assert memory.store_backend.load_item(
+                [func_id, shelved_ones_id]) == unshelved_ones_id
+            
+            # Test deleting the cached twos
+            assert os.path.exists(unshelved_ones_path)
+            shutil.rmtree(unshelved_ones_path, ignore_errors=False)
+            assert not os.path.exists(unshelved_ones_path)
+            twos_d = double_array(ones)
+            assert_array_all(twos_d.get(), 2)
+
+            # Test deleting the cached redirect
+            assert os.path.exists(shelved_ones_path)
+            shutil.rmtree(shelved_ones_path, ignore_errors=False)
+            assert not os.path.exists(shelved_ones_path)
+            twos_e = double_array(ones)
+            assert_array_all(twos_e.get(), 2)
+
+            # Test deleting both
+            assert os.path.exists(unshelved_ones_path)
+            assert os.path.exists(shelved_ones_path)
+            shutil.rmtree(unshelved_ones_path, ignore_errors=False)
+            shutil.rmtree(shelved_ones_path, ignore_errors=False)
+            assert not os.path.exists(unshelved_ones_path)
+            assert not os.path.exists(shelved_ones_path)
+            twos_f = double_array(ones)
+            assert_array_all(twos_f.get(), 2)
+
+            # Test corrupting the cached twos
+            assert os.path.exists(unshelved_ones_path)
+            try:
+                memory.store_backend.load_item([func_id, unshelved_ones_id])
+            except ValueError:
+                raise AssertionError("File shoud not be corrupted")
+            corrupt(unshelved_ones_path)
+            with pytest.raises(ValueError):
+                memory.store_backend.load_item([func_id, unshelved_ones_id])
+            assert os.path.exists(unshelved_ones_path)
+            twos_g = double_array(ones)
+            assert_array_all(twos_g.get(), 2)
+
+            # Test corrupting the cached redirect
+            assert os.path.exists(shelved_ones_path)
+            try:
+                memory.store_backend.load_item([func_id, shelved_ones_id])
+            except ValueError:
+                raise AssertionError("File shoud not be corrupted")
+            corrupt(shelved_ones_path)
+            with pytest.raises(ValueError):
+                memory.store_backend.load_item([func_id, shelved_ones_id])
+            assert os.path.exists(shelved_ones_path)
+            twos_h = double_array(ones)
+            assert_array_all(twos_h.get(), 2)
+
+            # Test corrupting both
+
+        continue
+
+        result = func(2)
+        assert isinstance(result, Result)
+        assert result.get() == 5
+
+        result.clear()
+        with raises(KeyError):
+            result.get()
+        result.clear()
 
 
 def test_call_and_shelve_argument_hash(tmpdir):
@@ -1045,7 +1274,7 @@ def test_memory_objects_repr(tmpdir):
     memory = Memory(location=tmpdir.strpath, verbose=0)
     memorized_func = memory.cache(my_func)
 
-    memorized_func_repr = 'MemorizedFunc(func={func}, location={location})'
+    memorized_func_repr = 'MemorizedFunc(func={func}, location={location}, auto_shelve=False)'
 
     assert str(memorized_func) == memorized_func_repr.format(
         func=my_func,

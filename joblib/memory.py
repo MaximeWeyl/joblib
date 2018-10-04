@@ -59,6 +59,38 @@ def extract_first_line(func_code):
     return func_code, first_line
 
 
+def _is_shelved(x):
+    return isinstance(x, BaseResult)
+
+
+def _unshelve_args(args, kwargs):
+    """From a mix of shelved and unshelved args and keywords,
+    returns unshelved args and keywords
+    """
+    uncached_args = [
+        a.get() if _is_shelved(a) else a
+        for a in args
+    ]
+
+    uncached_kwargs = dict(
+        (k, v.get()) if _is_shelved(v) else (k, v)
+        for (k, v) in kwargs.items()
+    )
+
+    return uncached_args, uncached_kwargs
+
+
+def _check_any_shelved_arg(args, kwargs):
+    """Returns True if there is any shelved argument or keyword"""
+    for a in args:
+        if _is_shelved(a):
+            return True
+    for v in kwargs.values():
+        if _is_shelved(v):
+            return True
+    return False
+
+
 class JobLibCollisionWarning(UserWarning):
     """ Warn that there might be a collision between names of functions.
     """
@@ -177,7 +209,12 @@ _FUNCTION_HASHES = weakref.WeakKeyDictionary()
 ###############################################################################
 # class `MemorizedResult`
 ###############################################################################
-class MemorizedResult(Logger):
+
+class BaseResult(Logger):
+    pass
+
+
+class MemorizedResult(BaseResult):
     """Object representing a cached value.
 
     Attributes
@@ -269,7 +306,7 @@ class MemorizedResult(Logger):
         return state
 
 
-class NotMemorizedResult(object):
+class NotMemorizedResult(BaseResult):
     """Class representing an arbitrary value.
 
     This class is a replacement for MemorizedResult when there is no cache.
@@ -322,17 +359,26 @@ class NotMemorizedFunc(object):
         Original undecorated function.
     """
     # Should be a light as possible (for speed)
-    def __init__(self, func):
+    def __init__(self, func, auto_shelve=False):
         self.func = func
+        self.auto_shelve = auto_shelve
 
     def __call__(self, *args, **kwargs):
-        return self.func(*args, **kwargs)
+        if not self.auto_shelve:
+            return self.func(*args, **kwargs)
+        else:
+            return self.call_and_shelve(*args, **kwargs)
 
     def call_and_shelve(self, *args, **kwargs):
+        if self.auto_shelve:
+            args, kwargs = _unshelve_args(args, kwargs)
+        
         return NotMemorizedResult(self.func(*args, **kwargs))
 
     def __repr__(self):
-        return '{0}(func={1})'.format(self.__class__.__name__, self.func)
+        return '{0}(func={1}, auto_shelve={2})'.format(
+            self.__class__.__name__,
+            self.func, self.auto_shelve)
 
     def clear(self, warn=True):
         # Argument "warn" is for compatibility with MemorizedFunc.clear
@@ -379,17 +425,23 @@ class MemorizedFunc(Logger):
     verbose: int, optional
         The verbosity flag, controls messages that are issued as
         the function is evaluated.
+
+    auto_shelve: bool, optional
+        If true, calling the object returns a reference, as would
+        call_and_shelve
     """
     # ------------------------------------------------------------------------
     # Public interface
     # ------------------------------------------------------------------------
 
     def __init__(self, func, location, backend='local', ignore=None,
-                 mmap_mode=None, compress=False, verbose=1, timestamp=None):
+                 mmap_mode=None, compress=False, verbose=1, timestamp=None,
+                 auto_shelve=False):
         Logger.__init__(self)
         self.mmap_mode = mmap_mode
         self.compress = compress
         self.func = func
+        self.auto_shelve = auto_shelve
 
         if ignore is None:
             ignore = []
@@ -426,7 +478,21 @@ class MemorizedFunc(Logger):
             doc = func.__doc__
         self.__doc__ = 'Memoized version of %s' % doc
 
-    def _cached_call(self, args, kwargs, shelving=False):
+    def _unshelve_and_hash_args_cache_callback(self, x):
+        return x[0]
+
+    def _unshelve_and_hash_args(self, *args, **kwargs):
+        """TODO
+        """
+        unshelved_args, unshelved_kwargs = _unshelve_args(args, kwargs)
+        unshelved_args_hash = self._get_argument_hash(
+            *unshelved_args, **unshelved_kwargs)
+        return unshelved_args_hash, unshelved_args, unshelved_kwargs
+
+    def _cached_call(
+        self, args, kwargs, shelving=False,
+        hashing_unshelved_args=False
+    ):
         """Call wrapped function and cache result, or read cache if available.
 
         This function returns the wrapped function output and some metadata.
@@ -440,6 +506,7 @@ class MemorizedFunc(Logger):
         shelving: bool
             True when called via the call_and_shelve function.
 
+        alternative_func=None TODO
 
         Returns
         -------
@@ -461,11 +528,36 @@ class MemorizedFunc(Logger):
         # Wether or not the memorized function must be called
         must_call = False
 
+        same_func_cached = self._check_previous_func_code(stacklevel=4)
+
+        if not hashing_unshelved_args:
+            # Standard call
+            alternative_func = None
+            cache_callback = None
+
+            if self.auto_shelve and _check_any_shelved_arg(args, kwargs):
+                shelved_args, shelved_kwargs = args, kwargs
+                (
+                    (args_id, args, kwargs),
+                    _,
+                    _
+                ) = self._cached_call(
+                    shelved_args, shelved_kwargs,
+                    shelving=False,
+                    hashing_unshelved_args=True
+                )
+
+        else:
+            alternative_func = self._unshelve_and_hash_args
+            cache_callback = self._unshelve_and_hash_args_cache_callback
+
         # FIXME: The statements below should be try/excepted
         # Compare the function code with the previous to see if the
         # function code has changed
-        if not (self._check_previous_func_code(stacklevel=4) and
-                self.store_backend.contains_item([func_id, args_id])):
+        if not (
+            same_func_cached and
+            self.store_backend.contains_item([func_id, args_id])
+        ):
             if self._verbose > 10:
                 _, name = get_func_name(self.func)
                 self.warn('Computing func {0}, argument hash {1} '
@@ -491,6 +583,10 @@ class MemorizedFunc(Logger):
                 else:
                     out = None
 
+                if hashing_unshelved_args:
+                    # Because only the first component was cached
+                    out = (out, None, None)
+
                 if self._verbose > 4:
                     t = time.time() - t0
                     _, name = get_func_name(self.func)
@@ -505,7 +601,18 @@ class MemorizedFunc(Logger):
                 must_call = True
 
         if must_call:
-            out, metadata = self.call(*args, **kwargs)
+            # When the args hash was loaded from shelved args
+            # cache, args and kwargs are None.
+            # If the arg hash was computed by the unshelving, or
+            # if no unshelving occurred, they are a list and a dict
+            if args is None or kwargs is None:
+                args, kwargs = _unshelve_args(shelved_args, shelved_kwargs)
+
+            out, metadata = self._call_and_cache(
+                args, kwargs, alternative_func=alternative_func,
+                cache_callback=cache_callback
+            )
+
             if self.mmap_mode is not None:
                 # Memmap the output at the first call to be consistent with
                 # later calls
@@ -539,7 +646,10 @@ class MemorizedFunc(Logger):
                                timestamp=self.timestamp)
 
     def __call__(self, *args, **kwargs):
-        return self._cached_call(args, kwargs)[0]
+        if not self.auto_shelve:
+            return self._cached_call(args, kwargs)[0]
+        else:
+            return self.call_and_shelve(*args, **kwargs)
 
     def __getstate__(self):
         """ We don't store the timestamp when pickling, to avoid the hash
@@ -630,8 +740,8 @@ class MemorizedFunc(Logger):
                 extract_first_line(
                     self.store_backend.get_cached_func_code([func_id]))
         except (IOError, OSError):  # some backend can also raise OSError
-                self._write_func_code(func_code, first_line)
-                return False
+            self._write_func_code(func_code, first_line)
+            return False
         if old_func_code == func_code:
             return True
 
@@ -701,13 +811,29 @@ class MemorizedFunc(Logger):
         """ Force the execution of the function with the given arguments and
             persist the output values.
         """
+        return self._call_and_cache(args, kwargs)
+
+    def _call_and_cache(
+        self, args, kwargs, alternative_func=None, cache_callback=None
+    ):
+        if alternative_func is not None:
+            func = alternative_func
+        else:
+            func = self.func
+
         start_time = time.time()
         func_id, args_id = self._get_output_identifiers(*args, **kwargs)
         if self._verbose > 0:
-            print(format_call(self.func, args, kwargs))
-        output = self.func(*args, **kwargs)
+            print(format_call(func, args, kwargs))
+
+        output = func(*args, **kwargs)
+        if cache_callback is not None:
+            output_cached = cache_callback(output)
+        else:
+            output_cached = output
+
         self.store_backend.dump_item(
-            [func_id, args_id], output, verbose=self._verbose)
+            [func_id, args_id], output_cached, verbose=self._verbose)
 
         duration = time.time() - start_time
         metadata = self._persist_input(duration, args, kwargs)
@@ -775,10 +901,11 @@ class MemorizedFunc(Logger):
     # ------------------------------------------------------------------------
 
     def __repr__(self):
-        return '{class_name}(func={func}, location={location})'.format(
+        return '{class_name}(func={func}, location={location}, auto_shelve={auto_shelve})'.format(
             class_name=self.__class__.__name__,
             func=self.func,
-            location=self.store_backend.location,)
+            location=self.store_backend.location,
+            auto_shelve=self.auto_shelve)
 
 
 ###############################################################################
@@ -894,7 +1021,8 @@ class Memory(Logger):
             return None
         return os.path.join(self.location, 'joblib')
 
-    def cache(self, func=None, ignore=None, verbose=None, mmap_mode=False):
+    def cache(self, func=None, ignore=None, verbose=None, mmap_mode=False,
+              auto_shelve=False):
         """ Decorates the given function func to only compute its return
             value for input arguments not cached on disk.
 
@@ -911,6 +1039,11 @@ class Memory(Logger):
                 The memmapping mode used when loading from cache
                 numpy arrays. See numpy.load for the meaning of the
                 arguments. By default that of the memory object is used.
+            auto_shelve: boolean, optional
+                If true, the decorated function will return references
+                when called directly. If false, the decorated function will
+                return real results, but references will still be available through
+                the call_and_shelve method.
 
             Returns
             -------
@@ -924,9 +1057,10 @@ class Memory(Logger):
             # Partial application, to be able to specify extra keyword
             # arguments in decorators
             return functools.partial(self.cache, ignore=ignore,
-                                     verbose=verbose, mmap_mode=mmap_mode)
+                                     verbose=verbose, mmap_mode=mmap_mode,
+                                     auto_shelve=auto_shelve)
         if self.store_backend is None:
-            return NotMemorizedFunc(func)
+            return NotMemorizedFunc(func, auto_shelve=auto_shelve)
         if verbose is None:
             verbose = self._verbose
         if mmap_mode is False:
@@ -937,7 +1071,8 @@ class Memory(Logger):
                              backend=self.backend,
                              ignore=ignore, mmap_mode=mmap_mode,
                              compress=self.compress,
-                             verbose=verbose, timestamp=self.timestamp)
+                             verbose=verbose, timestamp=self.timestamp,
+                             auto_shelve=auto_shelve)
 
     def clear(self, warn=True):
         """ Erase the complete cache directory.
